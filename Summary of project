@@ -1,0 +1,331 @@
+This project models a dual‑port ROM system with a small pipeline stage and a simple arbitration logic, then tests it with different address patterns in the testbench.
+
+Very high level:
+
+There is a ROM that can be read from two addresses at the same time (port A and port B).
+
+The ROM outputs are registered (pipelined) once.
+
+A small arbitration block decides what to drive on out_a and out_b if both ports access the same address.
+
+The testbench drives different address combinations to check:
+
+both ports reading the same address
+
+both ports reading different consecutive addresses
+
+one port counting up, the other counting down (forward/backward)
+
+Let’s go block by block.
+
+1. Top module: dual_address_rom_system
+This is the main DUT that connects all submodules.
+
+Ports:
+
+Inputs:
+
+clk, rst
+
+addr_a, addr_b (addresses for port A and port B)
+
+Outputs:
+
+out_a, out_b (final data outputs after pipeline + arbitration)
+
+Internal signals:
+
+From ROM: rom_data_a, rom_data_b
+
+Pipeline outputs:
+
+addresses: pipe_addr_a, pipe_addr_b
+
+data: pipe_data_a, pipe_data_b
+
+Connections:
+
+ROM:
+
+Inputs: clk, addr_a, addr_b
+
+Outputs: rom_data_a, rom_data_b
+
+Pipeline registers:
+
+Inputs:
+
+clk, rst
+
+addr_a_in = addr_a
+
+addr_b_in = addr_b
+
+data_a_in = rom_data_a
+
+data_b_in = rom_data_b
+
+Outputs:
+
+addr_a_out = pipe_addr_a
+
+addr_b_out = pipe_addr_b
+
+data_a_out = pipe_data_a
+
+data_b_out = pipe_data_b
+
+Arbitration:
+
+Inputs:
+
+addr_a = pipe_addr_a
+
+addr_b = pipe_addr_b
+
+data_a = pipe_data_a
+
+data_b = pipe_data_b
+
+Outputs:
+
+out_a, out_b
+
+So data path is:
+
+addr_a/addr_b → ROM → pipeline_registers → arbitration → out_a/out_b (with one clock of latency between each stage).
+
+2. Dual-port ROM: dual_port_rom
+This block stores constant data and supports two simultaneous reads.
+
+Key points:
+
+Memory declaration:
+reg [DATA_WIDTH-1:0] mem [0:(1<<ADDR_WIDTH)-1];
+With ADDR_WIDTH = 6 → depth = 2^6 = 64 locations (0 to 63).
+
+Initialization:
+
+initial block uses $readmemh("rom_project.memh", mem); to load ROM contents from a hex file at time 0.
+
+Then it prints first few entries for debug: mem[0], mem[1], mem[2].
+
+Synchronous read:
+
+
+verilog
+always @(posedge clk) begin
+    data_a <= mem[addr_a];
+    data_b <= mem[addr_b];
+end
+This means:
+
+At every rising edge of clk, ROM samples addr_a and addr_b.
+
+On that same edge, outputs data_a and data_b are updated with the corresponding memory values.
+
+So the ROM introduces 1 clock cycle latency from address to data.
+
+3. Pipeline stage: pipeline_registers
+This stage registers both addresses and data again, adding another pipeline stage.
+
+Ports:
+
+Inputs:
+
+clk, rst
+
+addr_a_in, addr_b_in
+
+data_a_in, data_b_in
+
+Outputs:
+
+addr_a_out, addr_b_out
+
+data_a_out, data_b_out
+
+Behavior:
+
+On reset (rst = 1):
+
+All outputs are cleared to 0.
+
+On each posedge clk when rst = 0:
+
+addr_a_out <= addr_a_in;
+
+addr_b_out <= addr_b_in;
+
+data_a_out <= data_a_in;
+
+data_b_out <= data_b_in;
+
+So overall latency from external address to arbitration inputs:
+
+1 clock inside ROM
+
+1 clock in pipeline registers
+→ 2 clock cycles latency from addr_a/addr_b to pipe_data_a/pipe_data_b.
+
+4. Arbitration: data_arbitration
+This is a simple combinational block that decides what the final outputs should be.
+
+Inputs:
+
+Addresses: addr_a, addr_b (these are pipeline outputs)
+
+Data: data_a, data_b (also pipeline outputs)
+
+Logic:
+
+
+verilog
+always @(*) begin
+    if (addr_a == addr_b) begin
+        // SAME ADDRESS ACCESS
+        out_a = data_a;
+        out_b = data_a;
+    end
+    else begin
+        // DIFFERENT ADDRESS ACCESS
+        out_a = data_a;
+        out_b = data_b;
+    end
+end
+Meaning:
+
+If both ports access the same address:
+
+Both outputs drive the same data (data_a).
+
+If ports access different addresses:
+
+out_a gets data_a (port A’s data).
+
+out_b gets data_b (port B’s data).
+
+This block is modeling a policy: in case of same-address access, both outputs are identical.
+
+5. Testbench: tb_dual_address_rom
+The testbench instantiates the top module and stimulates it with different address patterns.
+
+5.1. Declarations and DUT
+Parameters: ADDR_WIDTH = 6, DATA_WIDTH = 8
+
+Signals:
+
+clk, rst
+
+addr_a, addr_b
+
+out_a, out_b
+
+integer i;
+
+DUT instantiation with matching parameters.
+
+5.2. Clock generation
+
+verilog
+always #5 clk = ~clk;
+Clock period = 10 ns.
+
+Frequency = 100 MHz (conceptually).
+
+5.3. Initial block (test sequence)
+VCD dump:
+//and remove this to view on vivado 
+$dumpfile("dump.vcd");
+
+$dumpvars(0, tb_dual_address_rom);
+To view waveforms in GTKWave
+
+Reset sequence:
+
+clk = 0;
+
+rst = 1;
+
+addr_a = 0;
+
+addr_b = 0;
+
+Wait 20 ns: #20;
+
+rst = 0;
+
+After this, DUT starts operating normally.
+
+Same address access loop:
+
+
+verilog
+for (i = 0; i < 10; i = i + 1) begin
+    @(posedge clk);
+    addr_a = i;
+    addr_b = i;
+    @(posedge clk);
+    $display("TIME=%0t ADDR_A=%0d DATA_A=%h(%c) | ADDR_B=%0d DATA_B=%h(%c)",
+        $time, addr_a, out_a, out_a, addr_b, out_b, out_b);
+end
+Step-by-step for each iteration:
+
+Wait for a clock edge.
+
+Apply same address on both ports: addr_a = i; addr_b = i;
+
+Wait one more clock edge (to let pipeline + ROM update).
+
+Print time, addresses, and data (in hex and ASCII).
+This checks that out_a and out_b are equal when both ports read same address.
+
+Different address access loop:
+
+
+verilog
+for (i = 0; i < 20; i = i + 1) begin
+    @(posedge clk);
+    addr_a = i;
+    addr_b = i + 1;
+    @(posedge clk);
+    $display(...);
+end
+Here:
+
+Port A reads address i.
+
+Port B reads address i+1.
+
+Checks that outputs show data from two different addresses.
+
+Forward / backward access loop:
+
+
+verilog
+for (i = 0; i < 20; i = i + 1) begin
+    @(posedge clk);
+    addr_a = i;
+    addr_b = 63 - i;
+    @(posedge clk);
+    $display(...);
+end
+Port A counts upward from 0.
+
+Port B counts downward from 63.
+
+Tests “crossing” address patterns and how arbitration behaves when addresses differ and sometimes may meet in the middle.
+
+Finish:
+
+#20;
+
+$finish;
+
+So the testbench is mainly a functional stimulus to observe:
+
+Same-address behavior (both outputs equal).
+
+Different-address behavior.
+
+How the 2-cycle pipeline affects timing.
